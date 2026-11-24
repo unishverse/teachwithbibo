@@ -129,6 +129,17 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .hint { font-size: 14px; color: var(--ink-muted); }
 .error { font-size: 14px; font-weight: 700; color: var(--terracotta-deep); }
 .access-card .bb-btn { width: 100%; }
+.field input.plain { text-transform: none; letter-spacing: 0; font-weight: 600; }
+.acc-form { width: 100%; display: grid; gap: var(--space-4); text-align: left; }
+.acc-form h2 { font-size: 26px; line-height: 1.15; }
+.acc-form h3 { font-size: 18px; }
+.acc-form .bb-btn { width: 100%; }
+.acc-alt { font-size: 15px; }
+.acc-ok { background: var(--sunshine-soft); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); }
+.info-note { font-size: 14px; font-weight: 700; color: var(--bibo-blue-deep); }
+.acct-who { display: grid; gap: 2px; }
+.acct-who span { color: var(--ink-muted); font-weight: 700; font-size: 14px; }
+.acct-more summary { cursor: pointer; font-weight: 800; min-height: var(--tap-parent); display: flex; align-items: center; }
 
 /* ---------- Kode contoh di layar masuk ---------- */
 .demo-codes { width: 100%; display: grid; gap: var(--space-2); text-align: left; }
@@ -691,7 +702,7 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     "scissors": "img/418e08c0939fd202e21cc44239793385.png",
     "surprised": "img/2881c9c3940a4d4c52982e0b88369828.png"
   };
-  var STORE_KEY = "twb_code";
+  var STORE_KEY = "twb_session";
 
   /* ---------- Data volume ----------
      Kerangka 6 bagian sama untuk semua volume. Isi tiap volume ada di VOLDATA[n].
@@ -2269,15 +2280,48 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     { n: 9, title: "Yummy Snacks", theme: "Makanan ringan", thumb: "img/20ffe548003cbae54010d6d5fe31c792.png", alt: "Bibo memegang apel dan pisang", ready: true }
   ];
   var PRICE_ONE = "Rp 4.900", PRICE_ALL = "Rp 29.000", SAVE_ALL = "Rp 15.100";
-  /* ST-ALL-xxxx = semua volume; ST-01-xxxx … ST-09-xxxx = satu volume. BIBO-DEMO tetap diterima sebagai Vol. 1. */
-  function parseCode(raw) {
-    var v = String(raw || "").trim().toUpperCase().replace(/\s+/g, "");
-    if (!v) return null;
-    if (v === "BIBO-DEMO") return { code: v, all: false, vols: [1] };
-    var m = /^ST-(ALL|0[1-9])(-[A-Z0-9]+)?$/.exec(v);
-    if (!m) return null;
-    if (m[1] === "ALL") return { code: v, all: true, vols: VOLUMES.map(function (x) { return x.n; }) };
-    return { code: v, all: false, vols: [Number(m[1])] };
+  /* ---------- Akun (server Apps Script). Sesi + volume disimpan di perangkat agar tetap jalan offline. ---------- */
+  var TWB_API_URL = window.TWB_API_URL_OVERRIDE || "https://script.google.com/macros/s/AKfycbz4kcuTE6BW4hFSrSAXzw0xlefgawjnihEKlrvppSO-s4vRzeCyepbebGF7PIL0WIcc/exec";
+  var NET_MSG = "Tidak ada koneksi internet. Sambungkan dulu, lalu coba lagi.";
+  var SESSION_RE = /Sesi Anda sudah berakhir/;
+  function api(fn) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    if (!/^https?:/.test(TWB_API_URL)) return Promise.reject(new Error("Server belum diatur. Hubungi penjual."));
+    return fetch(TWB_API_URL, { method: "POST", redirect: "follow", headers: { "Content-Type": "text/plain;charset=utf-8" }, body: JSON.stringify({ fn: fn, args: args }) })
+      .then(function (r) { return r.json(); }, function () { throw new Error(NET_MSG); })
+      .then(function (o) {
+        if (o && o.ok) return o.result;
+        throw new Error((o && o.error) || "Terjadi kesalahan. Coba lagi sebentar lagi.");
+      }, function (e) { throw e && e.message === NET_MSG ? e : new Error(NET_MSG); });
+  }
+  function deviceLabel() {
+    var ua = navigator.userAgent || "";
+    var os = /iPad/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1) ? "iPad" : /iPhone/.test(ua) ? "iPhone" : /Android/.test(ua) ? "Android" : /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : "Lainnya";
+    var br = /Edg\//.test(ua) ? "Edge" : /SamsungBrowser/.test(ua) ? "Samsung Internet" : /Chrome|CriOS/.test(ua) ? "Chrome" : /Firefox|FxiOS/.test(ua) ? "Firefox" : /Safari/.test(ua) ? "Safari" : "Browser";
+    return os + " · " + br + (isInstalled() ? " (aplikasi)" : "");
+  }
+  function readSession() {
+    try { var s = JSON.parse(store(true) || "null"); return s && s.token && s.username && Array.isArray(s.vols) ? s : null; } catch (e) { return null; }
+  }
+  function accessFrom(s) {
+    var vols = s.vols.filter(function (n) { return n >= 1 && n <= VOLUMES.length; });
+    return { code: s.username, all: vols.length === VOLUMES.length, vols: vols };
+  }
+  function saveSession(s) { store(false, s ? JSON.stringify(s) : null); access = s ? accessFrom(s) : null; }
+  function signedIn(res) { saveSession({ token: res.token, username: res.user.username, vols: res.user.vols }); }
+  /* Saat aplikasi dibuka dan online: ambil volume terbaru; sesi yang sudah diakhiri (perangkat ke-4) keluar. */
+  function syncAccount() {
+    var s = readSession(); if (!s) return;
+    api("getMe", s.token).then(function (r) {
+      var cur = readSession(); if (!cur || cur.token !== s.token) return;
+      var changed = JSON.stringify(cur.vols) !== JSON.stringify(r.user.vols);
+      cur.vols = r.user.vols; cur.username = r.user.username; saveSession(cur);
+      if (changed && state.view === "library") renderLibrary();
+    }, function (e) {
+      if (!SESSION_RE.test(e.message)) return;   // offline atau server sibuk: tetap pakai data di perangkat
+      saveSession(null);
+      go("access", { mode: "login", info: "Akunmu dipakai masuk di perangkat lain, jadi perangkat ini dikeluarkan. Masuk lagi untuk melanjutkan." });
+    });
   }
   function canOpen(n) { return !!(access && (access.all || access.vols.indexOf(n) >= 0)); }
   var access = null;
@@ -2805,19 +2849,84 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
       (back ? '<button type="button" class="icon-btn" data-action="' + back + '" aria-label="Kembali">' + BACK_SVG + "</button>" : "") +
       '<div class="brand">Teach with Bibo<small>' + (state.view === "library" ? "Show &amp; Tell · Teach Your Kids" : "Show &amp; Tell · Vol. " + curVol) + '</small></div><span class="spacer"></span>' +
       (isInstalled() ? "" : '<button type="button" class="link-btn" data-action="install">Pasang aplikasi</button>') +
-      '<button type="button" class="link-btn" data-action="logout">Ganti kode</button></header>';
+      '<button type="button" class="link-btn" data-action="account">Akun</button></header>';
   }
 
-  function renderAccess(err) {
-    var saved = store(true) || "";
-    app.innerHTML =
-      '<main class="access"><form class="access-card" id="access-form" novalidate>' +
+  var accDraft = { code: "", label: "", username: "" };
+  function fieldHtml(id, label, o) {
+    o = o || {};
+    return '<div class="field"><label for="' + id + '">' + label + '</label><input id="' + id + '" name="' + id + '"' + (o.plain ? ' class="plain"' : "") +
+      ' type="' + (o.type || "text") + '" autocomplete="' + (o.ac || "off") + '" autocapitalize="' + (o.caps ? "characters" : "none") + '" spellcheck="false"' +
+      (o.inputmode ? ' inputmode="' + o.inputmode + '"' : "") + (o.ph ? ' placeholder="' + esc(o.ph) + '"' : "") + (o.val ? ' value="' + esc(o.val) + '"' : "") + ">" +
+      (o.hint ? '<p class="hint">' + o.hint + "</p>" : "") + "</div>";
+  }
+  function renderAccess(opts) {
+    opts = opts || {};
+    var mode = opts.mode || "code";
+    var msg = (opts.info ? '<p class="info-note" role="status">' + esc(opts.info) + "</p>" : "") + (opts.err ? '<p class="error" role="alert">' + esc(opts.err) + "</p>" : "");
+    var body = "";
+    if (mode === "register") {
+      body = '<form class="acc-form" id="f-register" novalidate><h2>Buat akun</h2><p class="acc-ok">Kode valid: <b>' + esc(accDraft.label) + "</b></p>" +
+        fieldHtml("username", "Username", { plain: true, ac: "username", ph: "contoh: bunda.raka", hint: "3–20 huruf kecil atau angka, boleh titik atau garis bawah. Dipakai untuk masuk." }) +
+        fieldHtml("password", "Password", { plain: true, type: "password", ac: "new-password", hint: "Minimal 8 karakter." }) +
+        fieldHtml("email", "Email", { plain: true, type: "email", ac: "email", inputmode: "email", hint: "Hanya untuk mengirim kode kalau kamu lupa password. Email tidak disimpan dalam bentuk yang bisa dibaca, dan tidak dipakai untuk promosi." }) +
+        msg + '<button type="submit" class="bb-btn">Buat akun &amp; buka</button></form>' +
+        '<p class="acc-alt"><button type="button" class="link-btn" data-acc="code">← Ganti kode</button></p>';
+    } else if (mode === "login") {
+      body = '<form class="acc-form" id="f-login" novalidate><h2>Masuk</h2>' + msg +
+        fieldHtml("username", "Username", { plain: true, ac: "username", val: accDraft.username }) +
+        fieldHtml("password", "Password", { plain: true, type: "password", ac: "current-password" }) +
+        '<button type="submit" class="bb-btn">Masuk</button></form>' +
+        '<p class="acc-alt"><button type="button" class="link-btn" data-acc="forgot">Lupa password?</button></p>' +
+        '<p class="acc-alt">Baru beli? <button type="button" class="link-btn" data-acc="code">Aktifkan kode pembelian</button></p>';
+    } else if (mode === "forgot") {
+      body = '<form class="acc-form" id="f-forgot" novalidate><h2>Lupa password</h2><p class="hint">Tulis username dan email yang kamu isi saat membuat akun. Kode 6 angka akan dikirim ke email itu.</p>' +
+        fieldHtml("username", "Username", { plain: true, ac: "username", val: accDraft.username }) +
+        fieldHtml("email", "Email", { plain: true, type: "email", ac: "email", inputmode: "email" }) +
+        msg + '<button type="submit" class="bb-btn">Kirim kode</button></form>' +
+        '<p class="acc-alt"><button type="button" class="link-btn" data-acc="login">← Kembali ke Masuk</button></p>';
+    } else if (mode === "reset") {
+      body = '<form class="acc-form" id="f-reset" novalidate><h2>Buat password baru</h2>' + msg +
+        fieldHtml("otp", "Kode dari email", { plain: true, inputmode: "numeric", ac: "one-time-code", ph: "6 angka" }) +
+        fieldHtml("password", "Password baru", { plain: true, type: "password", ac: "new-password", hint: "Minimal 8 karakter." }) +
+        '<button type="submit" class="bb-btn">Simpan &amp; masuk</button></form>' +
+        '<p class="acc-alt">Belum ada email? Cek folder spam, atau <button type="button" class="link-btn" data-acc="forgot">kirim ulang</button>.</p>' +
+        '<p class="acc-alt hint">Sudah tidak bisa membuka email itu? Hubungi penjual dan sebutkan username-mu.</p>';
+    } else {
+      mode = "code";
+      body = '<form class="acc-form" id="f-code" novalidate><h2>Aktifkan pembelian</h2>' +
+        fieldHtml("code", "Kode pembelian", { caps: true, ph: "BIBO-ALL-XXXX-XXXX", val: accDraft.code, hint: "Kode ada di pesan pembelian. Satu kode hanya bisa dipakai satu kali." }) +
+        msg + '<button type="submit" class="bb-btn">Lanjut</button></form>' +
+        '<p class="acc-alt">Sudah punya akun? <button type="button" class="link-btn" data-acc="login">Masuk</button></p>';
+    }
+    app.innerHTML = '<main class="access"><div class="access-card" data-mode="' + mode + '">' +
       '<div class="access-cover"><span class="tiny">Teach with Bibo</span><h1>Show &amp; Tell</h1><span class="vol">Teach Your Kids · 9 volume</span>' + biboImg("wave", "", "Bibo melambai") + "</div>" +
-      '<div class="field"><label for="code">Kode akses</label><input id="code" name="code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ST-01-XXXX" value="' + esc(saved) + '" aria-describedby="code-hint' + (err ? " code-err" : "") + '">' +
-      '<p class="hint" id="code-hint">Kode ada di pesan pembelian.</p>' +
-      (err ? '<p class="error" id="code-err" role="alert">' + esc(err) + "</p>" : "") + "</div>" +
-      '<button type="submit" class="bb-btn">Masuk</button>' +
-      '<div class="demo-codes"><p class="hint">Kode contoh untuk mencoba prototipe:</p><div class="demo-row"><button type="button" class="chip-code" data-democode="ST-01-DEMO">ST-01-DEMO<small>satuan, Vol. 1</small></button><button type="button" class="chip-code" data-democode="ST-02-DEMO">ST-02-DEMO<small>satuan, Vol. 2</small></button><button type="button" class="chip-code" data-democode="ST-ALL-DEMO">ST-ALL-DEMO<small>semua volume</small></button></div></div></form></main>';
+      body + "</div></main>";
+  }
+  function closeCel() { var c = document.getElementById("celebrate"); c.hidden = true; c.setAttribute("aria-labelledby", "cel-title"); }
+  function showAccount() {
+    var s = readSession(); if (!s) { go("access", { mode: "login" }); return; }
+    var c = document.getElementById("celebrate");
+    var host = overlayHost(); if (c.parentNode !== host) host.appendChild(c);
+    c.setAttribute("aria-labelledby", "acct-title");
+    var volsTxt = s.vols.length === VOLUMES.length ? "Semua 9 volume" : s.vols.length ? "Vol. " + s.vols.join(", ") : "Belum ada";
+    c.innerHTML = '<div class="lock-card acct-card"><h2 id="acct-title">Akun</h2><p class="acct-who"><b>@' + esc(s.username) + '</b><span>Terbuka: ' + esc(volsTxt) + "</span></p>" +
+      '<form class="acc-form" id="f-redeem" novalidate><h3>Punya kode pembelian baru?</h3>' +
+      fieldHtml("newcode", "Kode pembelian", { caps: true, ph: "BIBO-V3-XXXX-XXXX" }) + '<button type="submit" class="bb-btn">Buka volume</button></form>' +
+      '<details class="acct-more"><summary>Ganti password</summary><form class="acc-form" id="f-pass" novalidate>' +
+      fieldHtml("curpass", "Password sekarang", { plain: true, type: "password", ac: "current-password" }) +
+      fieldHtml("newpass", "Password baru", { plain: true, type: "password", ac: "new-password", hint: "Minimal 8 karakter." }) +
+      '<button type="submit" class="bb-btn bb-btn--secondary">Simpan password</button></form></details>' +
+      '<p class="hint">Satu akun bisa dipakai di 3 perangkat sekaligus. Masuk di perangkat berikutnya akan mengeluarkan perangkat yang paling lama tidak dipakai.</p>' +
+      '<div class="lock-actions"><button type="button" class="bb-btn bb-btn--secondary" data-action="logout">Keluar</button><button type="button" class="bb-btn" data-action="close-cel">Tutup</button></div></div>';
+    c.hidden = false;
+    var b = c.querySelector('[data-action="close-cel"]'); if (b) b.focus();
+  }
+  function signOut(info) {
+    var s = readSession();
+    if (s) api("logout", s.token).catch(function () {});
+    saveSession(null); closeCel();
+    go("access", { mode: "login", info: info || "" });
   }
 
   var LOCK_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10.5" width="14" height="10" rx="2.5"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></svg>';
@@ -2838,7 +2947,7 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     app.innerHTML = topbar(null) +
       '<main class="stack">' +
       '<section class="lib-head"><div class="lib-title"><p class="series">Teach with Bibo</p><h1>Show &amp; Tell</h1><p class="sub">Teach Your Kids · 9 volume · Kamu gurunya, Bibo bantu.</p></div>' +
-      '<div class="code-pill"><span class="code-pill__k">Kode ' + esc(access.code) + '</span><span class="code-pill__v">' + esc(codeLine) + "</span></div></section>" +
+      '<div class="code-pill"><span class="code-pill__k">Akun @' + esc(access.code) + '</span><span class="code-pill__v">' + esc(codeLine) + "</span></div></section>" +
       (access.all ? "" : '<section class="upsell"><div><b>Buka semua 9 volume cukup ' + PRICE_ALL + '.</b><span>Hemat ' + SAVE_ALL + " dibanding beli satuan " + PRICE_ONE + ' per volume.</span></div><button type="button" class="bb-btn" data-action="buy-all">Buka semua volume</button></section>') +
       '<section aria-labelledby="vols-h" class="stack" style="gap:16px"><div class="section-head"><h2 id="vols-h">Pilih volume</h2><p>' + opened + " dari 9 volume terbuka untuk kodemu.</p></div>" +
       '<div class="vol-grid">' + cards + "</div></section></main>";
@@ -2851,7 +2960,7 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
       "<p>Kodemu belum membuka volume ini. Pilih salah satu:</p>" +
       '<div class="buy-opts"><button type="button" class="buy-opt" data-action="buy-one" data-vol="' + v.n + '"><b>Vol. ' + v.n + " saja</b><span>" + PRICE_ONE + '</span></button>' +
       '<button type="button" class="buy-opt buy-opt--best" data-action="buy-all"><b>Semua 9 volume</b><span>' + PRICE_ALL + '</span><small>Hemat ' + SAVE_ALL + "</small></button></div>" +
-      '<div class="lock-actions"><button type="button" class="bb-btn bb-btn--secondary" data-action="logout">Saya punya kode lain</button><button type="button" class="bb-btn" data-action="close-cel">Tutup</button></div></div>';
+      '<div class="lock-actions"><button type="button" class="bb-btn bb-btn--secondary" data-action="account">Masukkan kode baru</button><button type="button" class="bb-btn" data-action="close-cel">Tutup</button></div></div>';
     c.hidden = false;
     var b = c.querySelector('[data-action="close-cel"]'); if (b) b.focus();
   }
@@ -3064,7 +3173,7 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     state.view = view; state.sheetOpen = false;
     app.className = "wrap" + (view === "section" ? " wide" : "");
     if (view === "section") { state.sec = opts.sec; state.slide = 0; game = null; builder = null; }
-    if (view === "access") renderAccess(opts.err);
+    if (view === "access") renderAccess(opts);
     else if (view === "library") renderLibrary();
     else if (view === "home") renderHome();
     else if (view === "section") renderSection();
@@ -3119,15 +3228,47 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
   }, true);
 
   /* ---------- Event ---------- */
+  function fval(id) { var i = document.getElementById(id); return i ? i.value : ""; }
   document.addEventListener("submit", function (e) {
-    if (e.target.id !== "access-form") return;
+    var f = e.target, id = f.id;
+    if (!/^f-/.test(id)) return;
     e.preventDefault();
-    var v = (document.getElementById("code").value || "").trim().toUpperCase();
-    if (!v) { go("access", { err: "Masukkan kode akses dulu." }); var i = document.getElementById("code"); if (i) i.focus(); return; }
-    var acc = parseCode(v);
-    if (!acc) { go("access", { err: "Kode tidak dikenali. Cek lagi huruf dan angkanya, contoh: ST-01-AB12." }); var i2 = document.getElementById("code"); if (i2) { i2.value = v; i2.focus(); } return; }
-    access = acc; store(false, acc.code);
-    go("library");
+    if (f.getAttribute("data-busy")) return;
+    var btn = f.querySelector('button[type="submit"]'), label = btn ? btn.innerHTML : "";
+    f.setAttribute("data-busy", "1"); if (btn) { btn.disabled = true; btn.innerHTML = "Sebentar…"; }
+    function done() { f.removeAttribute("data-busy"); if (btn) { btn.disabled = false; btn.innerHTML = label; } }
+    function fail(err) {
+      done();
+      if (SESSION_RE.test(err.message) && readSession()) { signOut(err.message); return; }
+      var p = f.querySelector(".error");
+      if (!p) { p = document.createElement("p"); p.className = "error"; p.setAttribute("role", "alert"); f.insertBefore(p, btn); }
+      p.textContent = err.message;
+    }
+    var s = readSession();
+    if (id === "f-code") {
+      var code = fval("code").trim();
+      if (!code) { fail(new Error("Masukkan kode pembelian dulu.")); return; }
+      api("checkCode", code).then(function (r) { done(); accDraft.code = code; accDraft.label = r.label; go("access", { mode: "register" }); }, fail);
+    } else if (id === "f-register") {
+      api("activate", accDraft.code, fval("username"), fval("password"), fval("email"), deviceLabel()).then(function (r) {
+        done(); signedIn(r); accDraft = { code: "", label: "", username: "" }; go("library"); toast("Akun dibuat. Selamat belajar bersama Bibo!");
+      }, fail);
+    } else if (id === "f-login") {
+      accDraft.username = fval("username").trim();
+      api("login", fval("username"), fval("password"), deviceLabel()).then(function (r) { done(); signedIn(r); go("library"); }, fail);
+    } else if (id === "f-forgot") {
+      accDraft.username = fval("username").trim();
+      api("requestReset", fval("username"), fval("email")).then(function (r) { done(); go("access", { mode: "reset", info: r.message }); }, fail);
+    } else if (id === "f-reset") {
+      api("confirmReset", accDraft.username, fval("otp"), fval("password"), deviceLabel()).then(function (r) { done(); signedIn(r); go("library"); toast("Password baru tersimpan."); }, fail);
+    } else if (id === "f-redeem") {
+      api("redeemCode", s && s.token, fval("newcode")).then(function (r) {
+        done(); var cur = readSession(); if (cur) { cur.vols = r.user.vols; saveSession(cur); }
+        closeCel(); go("library"); toast("Terbuka: Vol. " + r.added.join(", ") + ".");
+      }, fail);
+    } else if (id === "f-pass") {
+      api("changePassword", s && s.token, fval("curpass"), fval("newpass")).then(function () { done(); closeCel(); toast("Password sudah diganti."); }, fail);
+    }
   });
 
   document.addEventListener("click", function (e) {
@@ -3149,7 +3290,7 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     if (t.hasAttribute("data-chip")) { tapChip(t); return; }
     if (t.hasAttribute("data-mside")) { tapMatch(t); return; }
     var a = t.getAttribute("data-action");
-    if (t.hasAttribute("data-democode")) { var ci = document.getElementById("code"); if (ci) { ci.value = t.getAttribute("data-democode"); ci.focus(); } return; }
+    if (t.hasAttribute("data-acc")) { go("access", { mode: t.getAttribute("data-acc") }); return; }
     if (t.classList.contains("vol-card")) {
       var vn = Number(t.getAttribute("data-vol")), vv = VOLUMES[vn - 1];
       if (!canOpen(vn)) showLocked(vn);
@@ -3161,7 +3302,8 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
     else if (a === "library") go("library");
     else if (a === "buy-one" || a === "buy-all") toast("Tautan pembelian belum dipasang di prototipe ini.");
     else if (a === "install") showInstall();
-    else if (a === "logout") { document.getElementById("celebrate").hidden = true; store(false, null); access = null; go("access"); }
+    else if (a === "logout") signOut();
+    else if (a === "account") showAccount();
     else if (a === "prev") {
       if (state.slide > 0) { state.slide--; renderSlide(true); }
       else if (state.sec > 0) {
@@ -3223,8 +3365,10 @@ kbd { font-family: var(--font-ui); font-weight: 800; font-size: 13px; background
 
   /* ---------- Mulai ---------- */
   openVolume(1);
-  access = parseCode(store(true));
-  if (access) go("library"); else go("access");
+  try { window.localStorage.removeItem("twb_code"); } catch (e) {}
+  var sess0 = readSession();
+  access = sess0 ? accessFrom(sess0) : null;
+  if (access) { go("library"); syncAccount(); } else go("access");
 })();
 </script>
 
